@@ -1,63 +1,85 @@
 ################################################################################
-# Woodruff & van Dijk Framework: BPM Outcome Aggregation (Participant-Level)
+# Woodruff & van Dijk Framework: Behavioral Outcome Aggregation
+# (BPM + CBCL Participant-Level Outcomes)
 #
 # Purpose
 # -------
-# This script collapses repeated Brief Problem Monitor (BPM) observations into a
-# single participant-level outcome dataset for downstream causal analyses.
+# This script collapses repeated behavioral assessments into participant-level
+# outcome variables for use in the Woodruff & van Dijk causal inference framework.
 #
-# In the Woodruff & van Dijk framework, prenatal exposure models require one row
-# per participant. Because BPM scores may be observed at multiple timepoints and/or
-# informants, this script computes summary outcomes per participant for the BPM
-# domains used in primary analyses.
+# Because prenatal exposure analyses require one observation per participant,
+# this script aggregates repeated Brief Problem Monitor (BPM) and Child Behavior
+# Checklist (CBCL) assessments into summary outcomes.
 #
-# What this code does
-# -------------------
-# Starting from the BPM long-format dataset (BPM), this script:
-#   1. Groups records by participant_id
-#   2. Computes TWO participant-level summaries for each BPM outcome:
-#        - *_max  : maximum observed score across available assessments
-#        - *_mean : mean observed score across available assessments
-#   3. Preserves missingness: if all values for a participant are NA for a given
-#      outcome, the resulting summary is set to NA (rather than -Inf/NaN).
-#   4. Outputs a wide participant-level table (bpm_max_scores) suitable for
-#      merging into the analytic dataset used for ATT weighting and outcome models.
+# The script computes both:
+#   - Maximum score across all available assessments (max)
+#   - Mean score across all available assessments (mean)
 #
+# These two summaries represent:
+#   max  → peak symptom burden across follow-up
+#   mean → average symptom burden across follow-up
+#
+# Missingness is preserved: if all values for a participant are NA for a given
+# outcome, the resulting summary value is set to NA rather than returning
+# -Inf or NaN.
+#
+# ------------------------------------------------------------------------------
 # Required Input Data
-# -------------------
-# Assumes a data.frame named BPM exists in memory containing:
+# ------------------------------------------------------------------------------
+# Assumes a data.frame named BPM exists in memory containing repeated measures
+# of behavioral outcomes with the following variables:
 #
 # Identifiers
-#   - participant_id
+#   participant_id
+#   session_id
 #
-# BPM outcomes (continuous)
-#   - mh_t_bpm__ext_sum   : Teacher-report BPM Externalizing summary score
-#   - mh_y_bpm__int_sum   : Youth self-report BPM Internalizing summary score
+# Teacher-report BPM outcomes
+#   mh_t_bpm__ext_sum   : Teacher BPM Externalizing raw sum score
 #
+# Youth self-report BPM outcomes
+#   mh_y_bpm__int_sum   : Youth BPM Internalizing raw sum score
+#
+# Parent-report CBCL outcomes
+#   mh_p_cbcl__synd__int_sum : CBCL Internalizing syndrome raw sum score
+#   mh_p_cbcl__synd__ext_sum : CBCL Externalizing syndrome raw sum score
+#
+# ------------------------------------------------------------------------------
 # Output
-# ------
-# bpm_max_scores (one row per participant_id) with:
-#   - mh_t_bpm__ext_sum_max
-#   - mh_t_bpm__ext_sum_mean
-#   - mh_y_bpm__int_sum_max
-#   - mh_y_bpm__int_sum_mean
+# ------------------------------------------------------------------------------
+# bpm_max_scores
 #
-# Notes
-# -----
-# * The choice of max vs mean reflects two defensible outcome definitions:
-#     - max  captures peak symptom burden across follow-up
-#     - mean captures average symptom burden across follow-up
-# * If you later prefer a specific follow-up window (e.g., age-restricted or
-#   fixed event-time), filter BPM before running this aggregation step.
+# A participant-level dataset containing:
+#
+# Teacher BPM outcomes
+#   mh_t_bpm__ext_sum_max
+#   mh_t_bpm__ext_sum_mean
+#
+# Youth BPM outcomes
+#   mh_y_bpm__int_sum_max
+#   mh_y_bpm__int_sum_mean
+#
+# Parent CBCL outcomes
+#   mh_p_cbcl__synd__int_sum_max
+#   mh_p_cbcl__synd__int_sum_mean
+#   mh_p_cbcl__synd__ext_sum_max
+#   mh_p_cbcl__synd__ext_sum_mean
+#
+# ------------------------------------------------------------------------------
+# Repository Context
+# ------------------------------------------------------------------------------
+# These participant-level behavioral outcomes serve as dependent variables in
+# ATT-weighted regression models evaluating the association between prenatal
+# SSRI exposure and offspring psychopathology within the Woodruff & van Dijk
+# framework.
+#
 ################################################################################
-
 
 library(dplyr)
 
 bpm_max_scores <- BPM %>%
   group_by(participant_id) %>%
   summarise(
-    # ---- TEACHER EXTERNALIZING ----
+    # ---- TEACHER EXTERNALIZING (BPM) ----
     mh_t_bpm__ext_sum_max =
       if (all(is.na(mh_t_bpm__ext_sum))) NA_real_
       else max(mh_t_bpm__ext_sum, na.rm = TRUE),
@@ -66,7 +88,7 @@ bpm_max_scores <- BPM %>%
       if (all(is.na(mh_t_bpm__ext_sum))) NA_real_
       else mean(mh_t_bpm__ext_sum, na.rm = TRUE),
 
-    # ---- YOUTH INTERNALIZING ----
+    # ---- YOUTH INTERNALIZING (BPM) ----
     mh_y_bpm__int_sum_max =
       if (all(is.na(mh_y_bpm__int_sum))) NA_real_
       else max(mh_y_bpm__int_sum, na.rm = TRUE),
@@ -74,6 +96,28 @@ bpm_max_scores <- BPM %>%
     mh_y_bpm__int_sum_mean =
       if (all(is.na(mh_y_bpm__int_sum))) NA_real_
       else mean(mh_y_bpm__int_sum, na.rm = TRUE),
+
+    # ---- PARENT INTERNALIZING (CBCL) ----
+    # Using CBCL syndrome internalizing sum score:
+    #   mh_p_cbcl__synd__int_sum
+    mh_p_cbcl__synd__int_sum_max =
+      if (all(is.na(mh_p_cbcl__synd__int_sum))) NA_real_
+      else max(mh_p_cbcl__synd__int_sum, na.rm = TRUE),
+
+    mh_p_cbcl__synd__int_sum_mean =
+      if (all(is.na(mh_p_cbcl__synd__int_sum))) NA_real_
+      else mean(mh_p_cbcl__synd__int_sum, na.rm = TRUE),
+
+    # ---- PARENT EXTERNALIZING (CBCL) ----
+    # Using CBCL syndrome externalizing sum score:
+    #   mh_p_cbcl__synd__ext_sum
+    mh_p_cbcl__synd__ext_sum_max =
+      if (all(is.na(mh_p_cbcl__synd__ext_sum))) NA_real_
+      else max(mh_p_cbcl__synd__ext_sum, na.rm = TRUE),
+
+    mh_p_cbcl__synd__ext_sum_mean =
+      if (all(is.na(mh_p_cbcl__synd__ext_sum))) NA_real_
+      else mean(mh_p_cbcl__synd__ext_sum, na.rm = TRUE),
 
     .groups = "drop"
   )
