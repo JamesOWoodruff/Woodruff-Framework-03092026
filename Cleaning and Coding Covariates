@@ -2,7 +2,6 @@
 # Woodruff & van Dijk Framework: Covariate Cleaning and Coding
 #
 # Purpose
-# -------
 # This script prepares baseline demographic covariates from the ABCD dataset
 # for use in the Woodruff & van Dijk causal inference framework examining the
 # association between prenatal SSRI exposure and child behavioral outcomes.
