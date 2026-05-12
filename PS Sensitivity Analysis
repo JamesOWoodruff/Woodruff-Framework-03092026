@@ -1,0 +1,278 @@
+# ============================================================
+# WvD Framework — PS Specification Sensitivity Analysis
+# Youth BPM Internalizing (Mean) as primary outcome
+# ============================================================
+
+library(WeightIt)
+library(lmtest)
+library(sandwich)
+library(dplyr)
+library(cobalt)
+library(ggplot2)
+
+# ------------------------------------------------------------
+# OUTPUT PATH
+# ------------------------------------------------------------
+out_path <- "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/PS Sensitivity Analysis"
+dir.create(out_path, recursive = TRUE, showWarnings = FALSE)
+
+# ------------------------------------------------------------
+# OUTCOME MODEL FORMULA (Model B — held constant across all specs)
+# ------------------------------------------------------------
+outcome_formula_B <- bpm_int_mean ~ ssri_after +
+  ssri_before +
+  asr_dep_c + asr_anx_c +
+  mh_p_famhx__dep__moth_001 +
+  mom_age_preg_c +
+  mat_race +
+  ab_g_dyn__cohort_income__hhold__6lvl +
+  ab_g_dyn__cohort_edu__cgs +
+  planned_preg +
+  prenatal_vit +
+  nonssriad_after + otheratd_after +
+  anticonvulsant_after + stimulant_after +
+  sleepaid_after + anxiolytic_after +
+  antipsychotic_after + opioid_after +
+  alc_after + mj_after + nic_after + coc_after
+
+# ------------------------------------------------------------
+# BUILD ANALYTIC DATASET
+# ------------------------------------------------------------
+analytic <- Cov_baseline %>%
+  left_join(
+    MED_DHQ_Data_xlsx %>%
+      select(participant_id, ssri_after, ssri_before,
+             snri_before, snri_after,
+             nonssriad_before, nonssriad_after, otheratd_after,
+             anticonvulsant_before, anticonvulsant_after,
+             stimulant_before, stimulant_after,
+             sleepaid_before, sleepaid_after,
+             anxiolytic_before, anxiolytic_after,
+             antipsychotic_before, antipsychotic_after,
+             opioid_before, opioid_after,
+             alc_before, alc_after,
+             mj_before, mj_after,
+             nic_before, nic_after,
+             coc_before, coc_after),
+    by = "participant_id"
+  ) %>%
+  left_join(
+    bpm_max_scores %>%
+      select(participant_id,
+             bpm_int_mean = mh_y_bpm__int_sum_mean,
+             bpm_int_max  = mh_y_bpm__int_sum_max),
+    by = "participant_id"
+  ) %>%
+  left_join(
+    asr_matched %>%
+      select(participant_id,
+             asr_dep_c = asr_dep_mean,
+             asr_anx_c = asr_anx_mean),
+    by = "participant_id"
+  ) %>%
+  mutate(
+    mom_age_preg_c = as.numeric(scale(mom_age_preg, scale = FALSE)),
+    asr_dep_c      = as.numeric(scale(asr_dep_c,    scale = FALSE)),
+    asr_anx_c      = as.numeric(scale(asr_anx_c,    scale = FALSE))
+  ) %>%
+  filter(ab_p_demo__relation_001 == 1) %>%
+  filter(!(snri_before == 1 | snri_after == 1)) %>%
+  filter(!is.na(ssri_after)) %>%
+  filter(!is.na(bpm_int_mean))
+
+# ------------------------------------------------------------
+# PS COMPLETE-CASE RESTRICTION
+# ------------------------------------------------------------
+ps_covars_full <- c(
+  "asr_dep_c", "asr_anx_c",
+  "mh_p_famhx__dep__moth_001",
+  "mom_age_preg_c",
+  "mat_race",
+  "ab_g_dyn__cohort_income__hhold__6lvl",
+  "ab_g_dyn__cohort_edu__cgs",
+  "nonssriad_before", "anticonvulsant_before",
+  "stimulant_before", "sleepaid_before",
+  "anxiolytic_before", "antipsychotic_before",
+  "opioid_before",
+  "alc_before", "mj_before", "nic_before", "coc_before"
+)
+
+analytic <- analytic %>%
+  filter(if_all(all_of(ps_covars_full), ~ !is.na(.x)))
+
+cat("Analytic N after PS complete-case restriction:", nrow(analytic), "\n")
+cat("Exposed (ssri_after == 1):", sum(analytic$ssri_after == 1), "\n")
+
+# ============================================================
+# PS SPECIFICATION 1 — WvD Full (current primary spec)
+# ============================================================
+ps_full <- weightit(
+  ssri_after ~
+    asr_dep_c + asr_anx_c +
+    mh_p_famhx__dep__moth_001 +
+    mom_age_preg_c +
+    mat_race +
+    ab_g_dyn__cohort_income__hhold__6lvl +
+    ab_g_dyn__cohort_edu__cgs +
+    nonssriad_before + anticonvulsant_before +
+    stimulant_before + sleepaid_before +
+    anxiolytic_before + antipsychotic_before +
+    opioid_before +
+    alc_before + mj_before + nic_before + coc_before,
+  data     = analytic,
+  estimand = "ATT",
+  method   = "ps"
+)
+
+analytic$w_full <- trim(ps_full, at = 0.99)$weights
+
+# ============================================================
+# PS SPECIFICATION 2 — Lean (Milenna-adjacent spec)
+# ============================================================
+ps_lean <- weightit(
+  ssri_after ~
+    mh_p_famhx__dep__moth_001 +
+    mom_age_preg_c +
+    mat_race +
+    ab_g_dyn__cohort_edu__cgs +
+    alc_before + mj_before + nic_before + coc_before +
+    opioid_before +
+    planned_preg,
+  data     = analytic,
+  estimand = "ATT",
+  method   = "ps"
+)
+
+analytic$w_lean <- trim(ps_lean, at = 0.99)$weights
+
+# ============================================================
+# PS SPECIFICATION 3 — Lean, no trimming
+# ============================================================
+analytic$w_lean_notrim <- ps_lean$weights
+
+# ============================================================
+# PS SPECIFICATION 4 — Full, no trimming
+# ============================================================
+analytic$w_full_notrim <- ps_full$weights
+
+# ============================================================
+# PS SPECIFICATION 5 — Full, CBPS
+# ============================================================
+ps_full_cbps <- weightit(
+  ssri_after ~
+    asr_dep_c + asr_anx_c +
+    mh_p_famhx__dep__moth_001 +
+    mom_age_preg_c +
+    mat_race +
+    ab_g_dyn__cohort_income__hhold__6lvl +
+    ab_g_dyn__cohort_edu__cgs +
+    nonssriad_before + anticonvulsant_before +
+    stimulant_before + sleepaid_before +
+    anxiolytic_before + antipsychotic_before +
+    opioid_before +
+    alc_before + mj_before + nic_before + coc_before,
+  data     = analytic,
+  estimand = "ATT",
+  method   = "cbps"
+)
+
+analytic$w_full_cbps <- trim(ps_full_cbps, at = 0.99)$weights
+
+# ============================================================
+# PS SPECIFICATION 6 — Lean, CBPS
+# ============================================================
+ps_lean_cbps <- weightit(
+  ssri_after ~
+    mh_p_famhx__dep__moth_001 +
+    mom_age_preg_c +
+    mat_race +
+    ab_g_dyn__cohort_edu__cgs +
+    alc_before + mj_before + nic_before + coc_before +
+    opioid_before +
+    planned_preg,
+  data     = analytic,
+  estimand = "ATT",
+  method   = "cbps"
+)
+
+analytic$w_lean_cbps <- trim(ps_lean_cbps, at = 0.99)$weights
+
+# ============================================================
+# FIT OUTCOME MODELS
+# ============================================================
+fit1 <- lm(outcome_formula_B, data = analytic, weights = analytic$w_full)
+res_full_logistic <- as.data.frame(t(coeftest(fit1, vcov = vcovHC(fit1, type = "HC1"))["ssri_after", c(1,2,4)]))
+names(res_full_logistic) <- c("beta", "se", "p")
+
+fit2 <- lm(outcome_formula_B, data = analytic, weights = analytic$w_lean)
+res_lean_logistic <- as.data.frame(t(coeftest(fit2, vcov = vcovHC(fit2, type = "HC1"))["ssri_after", c(1,2,4)]))
+names(res_lean_logistic) <- c("beta", "se", "p")
+
+fit3 <- lm(outcome_formula_B, data = analytic, weights = analytic$w_lean_notrim)
+res_lean_notrim <- as.data.frame(t(coeftest(fit3, vcov = vcovHC(fit3, type = "HC1"))["ssri_after", c(1,2,4)]))
+names(res_lean_notrim) <- c("beta", "se", "p")
+
+fit4 <- lm(outcome_formula_B, data = analytic, weights = analytic$w_full_notrim)
+res_full_notrim <- as.data.frame(t(coeftest(fit4, vcov = vcovHC(fit4, type = "HC1"))["ssri_after", c(1,2,4)]))
+names(res_full_notrim) <- c("beta", "se", "p")
+
+fit5 <- lm(outcome_formula_B, data = analytic, weights = analytic$w_full_cbps)
+res_full_cbps <- as.data.frame(t(coeftest(fit5, vcov = vcovHC(fit5, type = "HC1"))["ssri_after", c(1,2,4)]))
+names(res_full_cbps) <- c("beta", "se", "p")
+
+fit6 <- lm(outcome_formula_B, data = analytic, weights = analytic$w_lean_cbps)
+res_lean_cbps <- as.data.frame(t(coeftest(fit6, vcov = vcovHC(fit6, type = "HC1"))["ssri_after", c(1,2,4)]))
+names(res_lean_cbps) <- c("beta", "se", "p")
+
+# ============================================================
+# COMPILE AND SAVE RESULTS TABLE
+# ============================================================
+results_table <- data.frame(
+  PS_Specification = c(
+    "1. Full (WvD primary)",
+    "2. Lean (Milenna-adjacent)",
+    "3. Lean, no trimming",
+    "4. Full, no trimming",
+    "5. Full, CBPS",
+    "6. Lean, CBPS"
+  ),
+  Method   = c("Logistic", "Logistic", "Logistic", "Logistic", "CBPS", "CBPS"),
+  Trimming = c("99th pct", "99th pct", "None", "None", "99th pct", "99th pct"),
+  rbind(
+    res_full_logistic,
+    res_lean_logistic,
+    res_lean_notrim,
+    res_full_notrim,
+    res_full_cbps,
+    res_lean_cbps
+  )
+)
+
+print(results_table)
+
+write.csv(results_table,
+          file.path(out_path, "WvD_PS_Sensitivity_BPMInt_Mean.csv"),
+          row.names = FALSE)
+
+cat("Results saved to:", out_path, "\n")
+
+# ============================================================
+# BALANCE DIAGNOSTICS — save as PNGs
+# ============================================================
+png(file.path(out_path, "LovePlot_Full_Logistic.png"), width = 900, height = 700, res = 120)
+love.plot(ps_full, binary = "std", thresholds = c(.1), abs = TRUE, title = "Full — Logistic")
+dev.off()
+
+png(file.path(out_path, "LovePlot_Lean_Logistic.png"), width = 900, height = 700, res = 120)
+love.plot(ps_lean, binary = "std", thresholds = c(.1), abs = TRUE, title = "Lean — Logistic")
+dev.off()
+
+png(file.path(out_path, "LovePlot_Full_CBPS.png"), width = 900, height = 700, res = 120)
+love.plot(ps_full_cbps, binary = "std", thresholds = c(.1), abs = TRUE, title = "Full — CBPS")
+dev.off()
+
+png(file.path(out_path, "LovePlot_Lean_CBPS.png"), width = 900, height = 700, res = 120)
+love.plot(ps_lean_cbps, binary = "std", thresholds = c(.1), abs = TRUE, title = "Lean — CBPS")
+dev.off()
+
+cat("Love plots saved to:", out_path, "\n")
