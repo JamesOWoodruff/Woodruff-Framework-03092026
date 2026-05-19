@@ -168,7 +168,8 @@ out_core_covars <- c(
   "ab_g_dyn__cohort_income__hhold__6lvl",
   "ab_g_dyn__cohort_edu__cgs",
   "planned_preg",
-  "prenatal_vit"
+  "prenatal_vit",
+  "puberty_score_c"
 )
 
 out_med_covars <- c(
