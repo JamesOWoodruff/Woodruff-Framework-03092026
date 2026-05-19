@@ -29,11 +29,15 @@
 #
 # Sample: psychotropic-excluded (mirrors B+PRS+No-Psych final model)
 #
+# Sensitivity analysis: primary model refit without puberty_score_long_c,
+#   using whichever age term (linear/quadratic) won in the primary model.
+#
 # REVISED:
 #  - ASR removed from PS model
 #  - Puberty score added as time-varying covariate (sex-appropriate PDS)
 #  - Psychotropics excluded from sample
 #  - MDD PRS + 10 ancestry PCs added to fixed effects
+#  - No-PDS sensitivity analysis added (section 13b)
 #
 # Assumes these objects already exist in memory:
 #   BPM               — long-format behavioral data WITH ab_g_dyn__visit_age
@@ -248,11 +252,11 @@ traj_df <- traj_df %>%
 age_center <- mean(traj_df$ab_g_dyn__visit_age, na.rm = TRUE)
 traj_df <- traj_df %>%
   mutate(
-    age_c              = ab_g_dyn__visit_age - age_center,
-    age_c2             = age_c^2,
-    mom_age_preg_c     = as.numeric(scale(mom_age_preg,     scale = FALSE)),
-    asr_dep_long_c     = as.numeric(scale(asr_dep_long,     scale = FALSE)),
-    asr_anx_long_c     = as.numeric(scale(asr_anx_long,     scale = FALSE)),
+    age_c                = ab_g_dyn__visit_age - age_center,
+    age_c2               = age_c^2,
+    mom_age_preg_c       = as.numeric(scale(mom_age_preg,       scale = FALSE)),
+    asr_dep_long_c       = as.numeric(scale(asr_dep_long,       scale = FALSE)),
+    asr_anx_long_c       = as.numeric(scale(asr_anx_long,       scale = FALSE)),
     puberty_score_long_c = as.numeric(scale(puberty_score_long, scale = FALSE))
   )
 
@@ -286,7 +290,6 @@ make_pred_grid <- function(model, data, age_center) {
   grid$pred <- predict(model, newdata = grid, re.form = NA)
 
   # 95% CI via fixed-effects design matrix and vcov
-  # Rebuild model matrix explicitly from the fixed-effects formula
   fe_formula <- nobars(formula(model))
   fe_formula[[2]] <- NULL  # drop response
 
@@ -322,14 +325,8 @@ make_pred_grid <- function(model, data, age_center) {
 }
 
 # -----------------------------
-# 6) Main loop: fit linear + quadratic models per outcome
+# 6) Define fixed covariate vectors
 # -----------------------------
-output_path <- "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/Results"
-dir.create(output_path, recursive = TRUE, showWarnings = FALSE)
-
-trajectory_results <- list()
-all_fixed_effects  <- list()
-
 prs_covars_traj <- c(
   "mdd_prs_z",
   "ab_g_stc__gen_pc__01", "ab_g_stc__gen_pc__02", "ab_g_stc__gen_pc__03",
@@ -338,6 +335,44 @@ prs_covars_traj <- c(
   "ab_g_stc__gen_pc__10"
 )
 
+# Primary: includes puberty_score_long_c
+fixed_covars_base <- c(
+  "ssri_before",
+  "asr_dep_long_c", "asr_anx_long_c",
+  "puberty_score_long_c",
+  "mh_p_famhx__dep__moth_001",
+  "mom_age_preg_c",
+  "mat_race",
+  "ab_g_dyn__cohort_income__hhold__6lvl",
+  "ab_g_dyn__cohort_edu__cgs",
+  "planned_preg",
+  "prenatal_vit",
+  "nonssriad_after", "otheratd_after",
+  "anticonvulsant_after", "stimulant_after",
+  "sleepaid_after", "anxiolytic_after",
+  "antipsychotic_after", "opioid_after",
+  "alc_after", "mj_after", "nic_after", "coc_after",
+  prs_covars_traj
+)
+
+# Sensitivity: puberty_score_long_c removed
+fixed_covars_nopds_base <- setdiff(fixed_covars_base, "puberty_score_long_c")
+
+# -----------------------------
+# 7) Output path
+# -----------------------------
+output_path <- "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/Results"
+dir.create(output_path, recursive = TRUE, showWarnings = FALSE)
+
+# -----------------------------
+# 8) Results containers
+# -----------------------------
+trajectory_results <- list()
+all_fixed_effects  <- list()
+
+# -----------------------------
+# 9) Main loop: fit primary + sensitivity models per outcome
+# -----------------------------
 for (out in outcomes) {
 
   y     <- out$var
@@ -366,28 +401,12 @@ for (out in outcomes) {
   cat("N exposed participants: ",
       n_distinct(data_y$participant_id[data_y$ssri_after == 1]), "\n")
 
-  # Fixed effects covariates (B+PRS specification)
-  fixed_covars <- c(
-    "ssri_before",
-    "asr_dep_long_c", "asr_anx_long_c",
-    "puberty_score_long_c",
-    "mh_p_famhx__dep__moth_001",
-    "mom_age_preg_c",
-    "mat_race",
-    "ab_g_dyn__cohort_income__hhold__6lvl",
-    "ab_g_dyn__cohort_edu__cgs",
-    "planned_preg",
-    "prenatal_vit",
-    "nonssriad_after", "otheratd_after",
-    "anticonvulsant_after", "stimulant_after",
-    "sleepaid_after", "anxiolytic_after",
-    "antipsychotic_after", "opioid_after",
-    "alc_after", "mj_after", "nic_after", "coc_after",
-    prs_covars_traj
-  )
+  # ---------------------------
+  # 9a) Primary model (with puberty score)
+  # ---------------------------
 
   # Drop any fixed covariates all-NA in this subset
-  fixed_covars <- fixed_covars[sapply(fixed_covars, function(v) {
+  fixed_covars <- fixed_covars_base[sapply(fixed_covars_base, function(v) {
     v %in% names(data_y) && sum(!is.na(data_y[[v]])) > 0
   })]
 
@@ -429,7 +448,7 @@ for (out in outcomes) {
   }
   cat("Winning model:", winning_label, "\n")
 
-  cat("\nFixed effects (winning model):\n")
+  cat("\nFixed effects (primary — with puberty score):\n")
   print(summary(winning_model)$coefficients)
 
   trajectory_results[[y]] <- list(
@@ -447,59 +466,144 @@ for (out in outcomes) {
   rownames(fe) <- NULL
   all_fixed_effects[[y]] <- fe
 
-  # ---------------------------
-  # 7) Prediction grid + plot
-  # ---------------------------
+  # Prediction grid + plot (primary)
   pred_grid <- tryCatch(
     make_pred_grid(winning_model, data_y, age_center),
     error = function(e) { cat("Prediction failed:", conditionMessage(e), "\n"); NULL }
   )
 
-  if (is.null(pred_grid)) next
+  if (!is.null(pred_grid)) {
+    cat("CI band NA check — lo95 NAs:", sum(is.na(pred_grid$lo95)),
+        "hi95 NAs:", sum(is.na(pred_grid$hi95)), "\n")
 
-  cat("CI band NA check — lo95 NAs:", sum(is.na(pred_grid$lo95)),
-      "hi95 NAs:", sum(is.na(pred_grid$hi95)), "\n")
+    p <- ggplot(pred_grid,
+                aes(x = age, y = pred,
+                    color = factor(ssri_after),
+                    fill  = factor(ssri_after))) +
+      geom_ribbon(aes(ymin = lo95, ymax = hi95), alpha = 0.15, color = NA) +
+      geom_line(linewidth = 1.3) +
+      labs(
+        title    = paste0(label, " Trajectory by Prenatal SSRI Exposure"),
+        subtitle = paste0(winning_label, " age term | ATT-weighted | B+PRS covariates | Psychotropics excluded"),
+        x        = "Child Age (years)",
+        y        = paste0("Adjusted ", label),
+        color    = "Prenatal SSRI",
+        fill     = "Prenatal SSRI"
+      ) +
+      scale_color_manual(
+        values = out$color,
+        labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
+      ) +
+      scale_fill_manual(
+        values = out$color,
+        labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
+      ) +
+      theme_classic(base_size = 14) +
+      theme(legend.position = "bottom")
 
-  p <- ggplot(pred_grid,
-              aes(x = age, y = pred,
-                  color = factor(ssri_after),
-                  fill  = factor(ssri_after))) +
-    geom_ribbon(aes(ymin = lo95, ymax = hi95), alpha = 0.15, color = NA) +
-    geom_line(linewidth = 1.3) +
-    labs(
-      title    = paste0(label, " Trajectory by Prenatal SSRI Exposure"),
-      subtitle = paste0(winning_label, " age term | ATT-weighted | B+PRS covariates | Psychotropics excluded"),
-      x        = "Child Age (years)",
-      y        = paste0("Adjusted ", label),
-      color    = "Prenatal SSRI",
-      fill     = "Prenatal SSRI"
-    ) +
-    scale_color_manual(
-      values = out$color,
-      labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
-    ) +
-    scale_fill_manual(
-      values = out$color,
-      labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
-    ) +
-    theme_classic(base_size = 14) +
-    theme(legend.position = "bottom")
+    print(p)
 
-  print(p)
+    ggsave(
+      filename = file.path(output_path, paste0("WvD_Trajectory_", gsub(" ", "_", label), ".png")),
+      plot     = p,
+      width    = 7,
+      height   = 5,
+      dpi      = 300
+    )
+    cat("Primary plot saved for:", label, "\n")
+  }
 
-  ggsave(
-    filename = file.path(output_path, paste0("WvD_Trajectory_", gsub(" ", "_", label), ".png")),
-    plot     = p,
-    width    = 7,
-    height   = 5,
-    dpi      = 300
+  # ---------------------------
+  # 9b) Sensitivity: refit winning age term without puberty score
+  # ---------------------------
+  cat("\n--- Sensitivity: no puberty score ---\n")
+
+  fixed_covars_nopds <- fixed_covars_nopds_base[sapply(fixed_covars_nopds_base, function(v) {
+    v %in% names(data_y) && sum(!is.na(data_y[[v]])) > 0
+  })]
+
+  fixed_rhs_nopds <- paste(fixed_covars_nopds, collapse = " + ")
+
+  if (winning_label == "Quadratic") {
+    formula_nopds <- as.formula(paste0(
+      y, " ~ age_c * ssri_after + age_c2 * ssri_after + ", fixed_rhs_nopds,
+      " + (1 | site/fam_id) + (1 | participant_id)"
+    ))
+  } else {
+    formula_nopds <- as.formula(paste0(
+      y, " ~ age_c * ssri_after + ", fixed_rhs_nopds,
+      " + (1 | site/fam_id) + (1 | participant_id)"
+    ))
+  }
+
+  model_nopds <- tryCatch(
+    lmer(formula_nopds, data = data_y, weights = w_att, REML = FALSE),
+    error = function(e) { cat("No-PDS sensitivity model failed:", conditionMessage(e), "\n"); NULL }
   )
 
-  cat("Plot saved for:", label, "\n")
+  if (!is.null(model_nopds)) {
+    cat("\nFixed effects (sensitivity — no puberty score):\n")
+    print(summary(model_nopds)$coefficients)
+
+    trajectory_results[[y]]$model_nopds <- model_nopds
+
+    fe_nopds <- as.data.frame(summary(model_nopds)$coefficients)
+    fe_nopds$term    <- rownames(fe_nopds)
+    fe_nopds$outcome <- label
+    fe_nopds$model   <- paste0(winning_label, "_noPDS")
+    rownames(fe_nopds) <- NULL
+    all_fixed_effects[[paste0(y, "_noPDS")]] <- fe_nopds
+
+    pred_grid_nopds <- tryCatch(
+      make_pred_grid(model_nopds, data_y, age_center),
+      error = function(e) { cat("No-PDS prediction failed:", conditionMessage(e), "\n"); NULL }
+    )
+
+    if (!is.null(pred_grid_nopds)) {
+      cat("CI band NA check (noPDS) — lo95 NAs:", sum(is.na(pred_grid_nopds$lo95)),
+          "hi95 NAs:", sum(is.na(pred_grid_nopds$hi95)), "\n")
+
+      p_nopds <- ggplot(pred_grid_nopds,
+                        aes(x = age, y = pred,
+                            color = factor(ssri_after),
+                            fill  = factor(ssri_after))) +
+        geom_ribbon(aes(ymin = lo95, ymax = hi95), alpha = 0.15, color = NA) +
+        geom_line(linewidth = 1.3) +
+        labs(
+          title    = paste0(label, " Trajectory by Prenatal SSRI Exposure"),
+          subtitle = paste0(winning_label, " age term | ATT-weighted | B+PRS covariates | Psychotropics excluded | No puberty score"),
+          x        = "Child Age (years)",
+          y        = paste0("Adjusted ", label),
+          color    = "Prenatal SSRI",
+          fill     = "Prenatal SSRI"
+        ) +
+        scale_color_manual(
+          values = out$color,
+          labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
+        ) +
+        scale_fill_manual(
+          values = out$color,
+          labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
+        ) +
+        theme_classic(base_size = 14) +
+        theme(legend.position = "bottom")
+
+      print(p_nopds)
+
+      ggsave(
+        filename = file.path(output_path, paste0("WvD_Trajectory_", gsub(" ", "_", label), "_noPDS.png")),
+        plot     = p_nopds,
+        width    = 7,
+        height   = 5,
+        dpi      = 300
+      )
+      cat("No-PDS sensitivity plot saved for:", label, "\n")
+    }
+  }
 }
 
 # -----------------------------
-# 8) Save combined fixed effects
+# 10) Save combined fixed effects
 # -----------------------------
 fixed_effects_all <- bind_rows(all_fixed_effects)
 names(fixed_effects_all)[1:4] <- c("estimate", "std_error", "df", "t_value")
@@ -514,5 +618,6 @@ cat("\n\nTrajectory analysis complete.\n")
 cat("Results saved to:", output_path, "\n")
 
 ################################################################################
-# Output: trajectory_results (list), fixed_effects_all, four PNG plots
+# Output: trajectory_results (list), fixed_effects_all, eight PNG plots
+#         (four primary + four noPDS sensitivity)
 ################################################################################
