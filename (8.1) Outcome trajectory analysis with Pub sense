@@ -19,26 +19,29 @@
 #   3. CBCL Internalizing         (mh_p_cbcl__synd__int_sum)
 #   4. CBCL Externalizing         (mh_p_cbcl__synd__ext_sum)
 #
-# Model specification mirrors Model B (primary):
-#   Fixed: age_c * ssri_after + age_c^2 * ssri_after +
-#          ssri_before + asr_dep_c + asr_anx_c +
+# Model specification mirrors final model (B+PRS, psychotropics excluded):
+#   Fixed: age_c * ssri_after [+ age_c^2 * ssri_after if quadratic wins] +
+#          ssri_before + asr_dep_long_c + asr_anx_long_c (time-varying) +
+#          puberty_score_long_c (time-varying, sex-appropriate PDS) +
+#          mdd_prs_z + 10 ancestry PCs +
 #          out_covars_base (demographic + medication + substance)
 #   Random: (1 | site/fam_id) + (1 | participant_id)
 #
-# Assumptions
-# -----------
-# Requires in memory:
+# Sample: psychotropic-excluded (mirrors B+PRS+No-Psych final model)
+#
+# REVISED:
+#  - ASR removed from PS model
+#  - Puberty score added as time-varying covariate (sex-appropriate PDS)
+#  - Psychotropics excluded from sample
+#  - MDD PRS + 10 ancestry PCs added to fixed effects
+#
+# Assumes these objects already exist in memory:
 #   BPM               — long-format behavioral data WITH ab_g_dyn__visit_age
 #   MED_DHQ_Data_xlsx — exposure coding (Script 4)
-#   Cov               — for ASR (long format, all sessions) and fam_id/site
+#   Cov               — for ASR, PDS (long format, all sessions) and fam_id/site
 #   Cov_baseline      — for baseline covariates (Script 3)
 #   FH_Density        — family history density
-#
-# Output
-# ------
-# trajectory_results  — list of model objects and anova comparisons per outcome
-# Four ggplot trajectory plots (one per outcome), printed and saved to output path
-# WvD_Trajectory_Results.csv — fixed effects from winning model per outcome
+#   prs_data          — MDD PRS and ancestry PCs (Script 6)
 ################################################################################
 
 library(dplyr)
@@ -76,26 +79,51 @@ outcomes <- list(
 
 # -----------------------------
 # 2) Build long-format analytic dataset
-#    Restrict to annual sessions only (age available)
-#    Apply same sample restrictions as primary analysis
 # -----------------------------
 annual_sessions <- c("ses-00A", "ses-01A", "ses-02A", "ses-03A",
                      "ses-04A", "ses-05A", "ses-06A")
 
-# Pull site and fam_id from Cov (needed for random effects)
+# Site and fam_id from Cov baseline
 site_fam <- Cov %>%
   filter(session_id == "ses-00A") %>%
   select(participant_id, site, fam_id = ab_g_stc__design_id__fam)
 
-# ASR: use session-level values (time-varying covariate)
-# For trajectory model we use the ASR at each session, not matched/mean
+# ASR: time-varying (session-level)
 asr_long <- Cov %>%
   filter(session_id %in% annual_sessions) %>%
   select(participant_id, session_id,
          asr_dep_long = mh_p_asr__dsm__dep_sum,
          asr_anx_long = mh_p_asr__dsm__anx_sum)
 
-# Exposure + baseline covariates (one row per participant)
+# Puberty score: time-varying, sex-appropriate PDS categorical (Tanner 1-5)
+pds_long <- Cov %>%
+  filter(session_id %in% annual_sessions) %>%
+  select(participant_id, session_id,
+         ab_g_stc__cohort_sex,
+         ph_p_pds__f_categ,
+         ph_p_pds__m_categ) %>%
+  mutate(
+    ph_p_pds__f_categ = na_if(as.numeric(ph_p_pds__f_categ), 999),
+    ph_p_pds__f_categ = na_if(ph_p_pds__f_categ, 777),
+    ph_p_pds__m_categ = na_if(as.numeric(ph_p_pds__m_categ), 999),
+    ph_p_pds__m_categ = na_if(ph_p_pds__m_categ, 777),
+    puberty_score_long = case_when(
+      ab_g_stc__cohort_sex == 2 ~ ph_p_pds__f_categ,
+      ab_g_stc__cohort_sex == 1 ~ ph_p_pds__m_categ,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  select(participant_id, session_id, puberty_score_long)
+
+# PRS (participant-level)
+prs_slim <- prs_data %>%
+  select(participant_id, mdd_prs_z,
+         ab_g_stc__gen_pc__01, ab_g_stc__gen_pc__02, ab_g_stc__gen_pc__03,
+         ab_g_stc__gen_pc__04, ab_g_stc__gen_pc__05, ab_g_stc__gen_pc__06,
+         ab_g_stc__gen_pc__07, ab_g_stc__gen_pc__08, ab_g_stc__gen_pc__09,
+         ab_g_stc__gen_pc__10)
+
+# Exposure + baseline covariates
 exposure_base <- MED_DHQ_Data_xlsx %>%
   select(participant_id, ssri_after, ssri_before,
          snri_before, snri_after,
@@ -135,19 +163,29 @@ bpm_long <- BPM %>%
          mh_p_cbcl__synd__ext_sum) %>%
   left_join(reporter_var, by = c("participant_id", "session_id"))
 
-
 # Join everything
 traj_df <- bpm_long %>%
   left_join(exposure_base,  by = "participant_id") %>%
   left_join(baseline_covs,  by = "participant_id") %>%
   left_join(asr_long,       by = c("participant_id", "session_id")) %>%
+  left_join(pds_long,       by = c("participant_id", "session_id")) %>%
+  left_join(prs_slim,       by = "participant_id") %>%
   left_join(site_fam,       by = "participant_id") %>%
   left_join(FH_Density,     by = "participant_id")
 
-# Sample restrictions: biological mothers, no SNRIs
+# Sample restrictions: biological mothers, no SNRIs, no concurrent psychotropics
 traj_df <- traj_df %>%
   filter(ab_p_demo__relation_001 == 1) %>%
-  filter(!(snri_before == 1 | snri_after == 1))
+  filter(!(snri_before == 1 | snri_after == 1)) %>%
+  filter(
+    nonssriad_after      == 0,
+    anxiolytic_after     == 0,
+    opioid_after         == 0,
+    anticonvulsant_after == 0,
+    antipsychotic_after  == 0,
+    stimulant_after      == 0,
+    sleepaid_after       == 0
+  )
 
 cat("Trajectory dataset rows:        ", nrow(traj_df), "\n")
 cat("Distinct participants:           ", n_distinct(traj_df$participant_id), "\n")
@@ -156,8 +194,8 @@ cat("Exposed (ssri_after == 1):       ",
 
 # -----------------------------
 # 3) PS model for ATT weights
-#    Same PS specification as primary analysis
-#    Fit on participant-level (baseline) data, then merge weights back
+#    No ASR in PS model (matches final model specification)
+#    Fit on participant-level (baseline) data, merge weights back
 # -----------------------------
 ps_covars <- c(
   "mh_p_famhx__dep__moth_001",
@@ -165,8 +203,6 @@ ps_covars <- c(
   "mat_race",
   "ab_g_dyn__cohort_income__hhold__6lvl",
   "ab_g_dyn__cohort_edu__cgs",
-  "asr_dep_mean_c",
-  "asr_anx_mean_c",
   "nonssriad_before",
   "anticonvulsant_before",
   "stimulant_before",
@@ -180,10 +216,6 @@ ps_covars <- c(
   "coc_before"
 )
 
-# Pull baseline ASR means for PS model (from asr_matched, already computed)
-asr_means_ps <- asr_matched %>%
-  select(participant_id, asr_dep_mean, asr_anx_mean)
-
 # Build participant-level PS dataset
 ps_df <- traj_df %>%
   distinct(participant_id, ssri_after,
@@ -193,12 +225,7 @@ ps_df <- traj_df %>%
            nonssriad_before, anticonvulsant_before, stimulant_before,
            sleepaid_before, anxiolytic_before, antipsychotic_before,
            opioid_before, alc_before, mj_before, nic_before, coc_before) %>%
-  left_join(asr_means_ps, by = "participant_id") %>%
-  mutate(
-    mom_age_preg_c = as.numeric(scale(mom_age_preg, scale = FALSE)),
-    asr_dep_mean_c = as.numeric(scale(asr_dep_mean, scale = FALSE)),
-    asr_anx_mean_c = as.numeric(scale(asr_anx_mean, scale = FALSE))
-  ) %>%
+  mutate(mom_age_preg_c = as.numeric(scale(mom_age_preg, scale = FALSE))) %>%
   filter(if_all(all_of(ps_covars), ~ !is.na(.x)),
          !is.na(ssri_after))
 
@@ -210,28 +237,29 @@ w_out_traj <- weightit(
   method   = "ps",
   estimand = "ATT"
 )
-w_out_traj <- trim(w_out_traj, at = 0.99)
+w_out_traj  <- trim(w_out_traj, at = 0.99)
 ps_df$w_att <- w_out_traj$weights
 
 # Merge weights back to long-format data
 traj_df <- traj_df %>%
   left_join(ps_df %>% select(participant_id, w_att), by = "participant_id")
 
-# Center age
+# Center continuous variables
 age_center <- mean(traj_df$ab_g_dyn__visit_age, na.rm = TRUE)
 traj_df <- traj_df %>%
   mutate(
-    age_c  = ab_g_dyn__visit_age - age_center,
-    age_c2 = age_c^2,
-    asr_dep_long_c = as.numeric(scale(asr_dep_long, scale = FALSE)),
-    asr_anx_long_c = as.numeric(scale(asr_anx_long, scale = FALSE))
+    age_c              = ab_g_dyn__visit_age - age_center,
+    age_c2             = age_c^2,
+    mom_age_preg_c     = as.numeric(scale(mom_age_preg,     scale = FALSE)),
+    asr_dep_long_c     = as.numeric(scale(asr_dep_long,     scale = FALSE)),
+    asr_anx_long_c     = as.numeric(scale(asr_anx_long,     scale = FALSE)),
+    puberty_score_long_c = as.numeric(scale(puberty_score_long, scale = FALSE))
   )
 
 cat("Age center (grand mean):", round(age_center, 2), "years\n")
 
 # -----------------------------
 # 4) Helper: reference values for prediction grid
-#    (mirrors Milenna's get_ref function)
 # -----------------------------
 get_ref <- function(x) {
   if (is.numeric(x)) median(x, na.rm = TRUE)
@@ -239,47 +267,76 @@ get_ref <- function(x) {
 }
 
 # -----------------------------
-# 5) Helper: build prediction grid
+# 5) Helper: build prediction grid with 95% CI band (fixed effects only)
 # -----------------------------
-make_pred_grid <- function(model, data, exposure_var, age_center) {
+make_pred_grid <- function(model, data, age_center) {
   age_seq <- seq(
-    from = min(data$ab_g_dyn__visit_age, na.rm = TRUE),
-    to   = max(data$ab_g_dyn__visit_age, na.rm = TRUE),
+    from       = min(data$ab_g_dyn__visit_age, na.rm = TRUE),
+    to         = max(data$ab_g_dyn__visit_age, na.rm = TRUE),
     length.out = 100
   )
 
-  grid <- expand.grid(
-    age                = age_seq,
-    ssri_after         = c(0, 1)
-  ) %>%
-    mutate(
-      age_c  = age - age_center,
-      age_c2 = age_c^2
-    )
+  grid <- expand.grid(age = age_seq, ssri_after = c(0, 1)) %>%
+    mutate(age_c = age - age_center, age_c2 = age_c^2)
 
-  # Fill all other model terms at reference values
-  covars_needed <- setdiff(
-    names(model.frame(model)),
-    c(names(grid), "(weights)")
-  )
+  covars_needed <- setdiff(names(model.frame(model)), c(names(grid), "(weights)"))
+  for (v in covars_needed) grid[[v]] <- get_ref(data[[v]])
 
-  for (v in covars_needed) {
-    grid[[v]] <- get_ref(data[[v]])
+  # Point estimate (fixed effects only, no random effects)
+  grid$pred <- predict(model, newdata = grid, re.form = NA)
+
+  # 95% CI via fixed-effects design matrix and vcov
+  # Rebuild model matrix explicitly from the fixed-effects formula
+  fe_formula <- nobars(formula(model))
+  fe_formula[[2]] <- NULL  # drop response
+
+  # Ensure all factors in grid have the same levels as in the training model frame
+  mf_train <- model.frame(model)
+  for (v in names(grid)) {
+    if (v %in% names(mf_train) && is.factor(mf_train[[v]])) {
+      grid[[v]] <- factor(grid[[v]], levels = levels(mf_train[[v]]))
+    }
   }
 
-  grid$pred <- predict(model, newdata = grid, re.form = NA)
+  mm <- tryCatch({
+    model.matrix(fe_formula, data = grid)
+  }, error = function(e) {
+    message("model.matrix failed: ", conditionMessage(e))
+    NULL
+  })
+
+  if (!is.null(mm)) {
+    vc <- as.matrix(vcov(model))
+    common <- intersect(colnames(mm), colnames(vc))
+    mm2 <- mm[, common, drop = FALSE]
+    vc2 <- vc[common, common, drop = FALSE]
+    se <- sqrt(pmax(0, diag(mm2 %*% vc2 %*% t(mm2))))
+    grid$lo95 <- grid$pred - 1.96 * se
+    grid$hi95 <- grid$pred + 1.96 * se
+  } else {
+    grid$lo95 <- NA_real_
+    grid$hi95 <- NA_real_
+  }
+
   grid
 }
 
 # -----------------------------
-# 6) Main loop: fit linear + quadratic models per outcome,
-#    compare via anova(), plot winning model trajectory
+# 6) Main loop: fit linear + quadratic models per outcome
 # -----------------------------
 output_path <- "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/Results"
 dir.create(output_path, recursive = TRUE, showWarnings = FALSE)
 
 trajectory_results <- list()
 all_fixed_effects  <- list()
+
+prs_covars_traj <- c(
+  "mdd_prs_z",
+  "ab_g_stc__gen_pc__01", "ab_g_stc__gen_pc__02", "ab_g_stc__gen_pc__03",
+  "ab_g_stc__gen_pc__04", "ab_g_stc__gen_pc__05", "ab_g_stc__gen_pc__06",
+  "ab_g_stc__gen_pc__07", "ab_g_stc__gen_pc__08", "ab_g_stc__gen_pc__09",
+  "ab_g_stc__gen_pc__10"
+)
 
 for (out in outcomes) {
 
@@ -299,6 +356,7 @@ for (out in outcomes) {
       !is.na(ssri_before),
       !is.na(asr_dep_long_c),
       !is.na(asr_anx_long_c),
+      !is.na(puberty_score_long_c),
       !is.na(site),
       !is.na(fam_id)
     )
@@ -308,12 +366,13 @@ for (out in outcomes) {
   cat("N exposed participants: ",
       n_distinct(data_y$participant_id[data_y$ssri_after == 1]), "\n")
 
-  # Fixed effects covariates (Model B specification)
+  # Fixed effects covariates (B+PRS specification)
   fixed_covars <- c(
     "ssri_before",
     "asr_dep_long_c", "asr_anx_long_c",
+    "puberty_score_long_c",
     "mh_p_famhx__dep__moth_001",
-    "mom_age_preg",
+    "mom_age_preg_c",
     "mat_race",
     "ab_g_dyn__cohort_income__hhold__6lvl",
     "ab_g_dyn__cohort_edu__cgs",
@@ -323,28 +382,26 @@ for (out in outcomes) {
     "anticonvulsant_after", "stimulant_after",
     "sleepaid_after", "anxiolytic_after",
     "antipsychotic_after", "opioid_after",
-    "alc_after", "mj_after", "nic_after", "coc_after"
+    "alc_after", "mj_after", "nic_after", "coc_after",
+    prs_covars_traj
   )
 
-  # Drop any fixed covariates that are all-NA in this subset
+  # Drop any fixed covariates all-NA in this subset
   fixed_covars <- fixed_covars[sapply(fixed_covars, function(v) {
     v %in% names(data_y) && sum(!is.na(data_y[[v]])) > 0
   })]
 
   fixed_rhs <- paste(fixed_covars, collapse = " + ")
 
-  # Linear model: age_c * ssri_after
-formula_linear <- as.formula(paste0(
-  y, " ~ age_c * ssri_after + ", fixed_rhs,
-  " + (1 | site/fam_id) + (1 | participant_id)"
-))
+  formula_linear <- as.formula(paste0(
+    y, " ~ age_c * ssri_after + ", fixed_rhs,
+    " + (1 | site/fam_id) + (1 | participant_id)"
+  ))
 
-  # Quadratic model: age_c * ssri_after + age_c2 * ssri_after
-formula_quad <- as.formula(paste0(
-  y, " ~ age_c * ssri_after + age_c2 * ssri_after + ", fixed_rhs,
-  " + (1 | site/fam_id) + (1 | participant_id)"
-))
-
+  formula_quad <- as.formula(paste0(
+    y, " ~ age_c * ssri_after + age_c2 * ssri_after + ", fixed_rhs,
+    " + (1 | site/fam_id) + (1 | participant_id)"
+  ))
 
   model_linear <- tryCatch(
     lmer(formula_linear, data = data_y, weights = w_att, REML = FALSE),
@@ -358,12 +415,10 @@ formula_quad <- as.formula(paste0(
 
   if (is.null(model_linear) || is.null(model_quad)) next
 
-  # Compare linear vs quadratic
   anova_result <- anova(model_linear, model_quad)
   cat("\nLinear vs Quadratic anova:\n")
   print(anova_result)
 
-  # Select winning model
   quad_p <- anova_result[["Pr(>Chisq)"]][2]
   if (!is.na(quad_p) && quad_p < .05) {
     winning_model <- model_quad
@@ -374,11 +429,9 @@ formula_quad <- as.formula(paste0(
   }
   cat("Winning model:", winning_label, "\n")
 
-  # Fixed effects summary
   cat("\nFixed effects (winning model):\n")
   print(summary(winning_model)$coefficients)
 
-  # Store results
   trajectory_results[[y]] <- list(
     model_linear  = model_linear,
     model_quad    = model_quad,
@@ -387,7 +440,6 @@ formula_quad <- as.formula(paste0(
     winning_label = winning_label
   )
 
-  # Fixed effects to data frame
   fe <- as.data.frame(summary(winning_model)$coefficients)
   fe$term    <- rownames(fe)
   fe$outcome <- label
@@ -399,23 +451,34 @@ formula_quad <- as.formula(paste0(
   # 7) Prediction grid + plot
   # ---------------------------
   pred_grid <- tryCatch(
-    make_pred_grid(winning_model, data_y, "ssri_after", age_center),
+    make_pred_grid(winning_model, data_y, age_center),
     error = function(e) { cat("Prediction failed:", conditionMessage(e), "\n"); NULL }
   )
 
   if (is.null(pred_grid)) next
 
+  cat("CI band NA check — lo95 NAs:", sum(is.na(pred_grid$lo95)),
+      "hi95 NAs:", sum(is.na(pred_grid$hi95)), "\n")
+
   p <- ggplot(pred_grid,
-              aes(x = age, y = pred, color = factor(ssri_after))) +
+              aes(x = age, y = pred,
+                  color = factor(ssri_after),
+                  fill  = factor(ssri_after))) +
+    geom_ribbon(aes(ymin = lo95, ymax = hi95), alpha = 0.15, color = NA) +
     geom_line(linewidth = 1.3) +
     labs(
-      title  = paste0(label, " Trajectory by Prenatal SSRI Exposure"),
-      subtitle = paste0(winning_label, " age term | ATT-weighted | Model B covariates"),
-      x      = "Child Age (years)",
-      y      = paste0("Adjusted ", label),
-      color  = "Prenatal SSRI"
+      title    = paste0(label, " Trajectory by Prenatal SSRI Exposure"),
+      subtitle = paste0(winning_label, " age term | ATT-weighted | B+PRS covariates | Psychotropics excluded"),
+      x        = "Child Age (years)",
+      y        = paste0("Adjusted ", label),
+      color    = "Prenatal SSRI",
+      fill     = "Prenatal SSRI"
     ) +
     scale_color_manual(
+      values = out$color,
+      labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
+    ) +
+    scale_fill_manual(
       values = out$color,
       labels = c("0" = "Unexposed", "1" = "SSRI Exposed")
     ) +
