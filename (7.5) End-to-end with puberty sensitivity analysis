@@ -1,0 +1,497 @@
+################################################################################
+# Woodruff & van Dijk Framework (end-to-end execution)
+# ATT weighting + balance diagnostics + weighted outcome models
+#
+# REVISED:
+#  - ACEs dropped entirely from all outcome models (null moderation result;
+#    theoretical motivation was moderation only — Pavlicova & van Dijk)
+#  - Model configs: A, B [primary], C, B+PRS (no ACEs, no interaction anywhere)
+#  - ASR removed from PS model (reverts to correct March/April 13 spec)
+#  - pds_matched joined; temporally matched puberty score added to all outcome
+#    models via pds_covar_lookup (mirrors asr_covar_lookup structure)
+#  - Final model: B+PRS specification on psychotropic-excluded sample
+#    Run with and without puberty score (section 13)
+#
+# Assumes these objects already exist in memory:
+#   MED_DHQ_Data_xlsx  (Script 4)
+#   Cov_baseline       (Script 3)
+#   FH_Density         (external)
+#   bpm_max_scores     (Script 1)
+#   asr_matched        (Script 2)
+#   pds_matched        (Script 5)
+#   prs_data           (Script 6)
+################################################################################
+
+# -----------------------------
+# 0) Packages
+# -----------------------------
+library(dplyr)
+library(WeightIt)
+library(cobalt)
+library(sandwich)
+library(lmtest)
+library(broom)
+library(tibble)
+library(car)
+
+# -----------------------------
+# 1) Build analytic_df (joins)
+# -----------------------------
+prs_data_slim <- prs_data %>%
+  select(participant_id, mdd_prs, mdd_prs_z)
+
+analytic_df <- MED_DHQ_Data_xlsx %>%
+  left_join(Cov_baseline,   by = "participant_id") %>%
+  left_join(FH_Density,     by = "participant_id") %>%
+  left_join(bpm_max_scores, by = "participant_id") %>%
+  left_join(asr_matched,    by = "participant_id") %>%
+  left_join(pds_matched,    by = "participant_id") %>%
+  left_join(prs_data_slim,  by = "participant_id")
+
+# -----------------------------
+# 2) Integrity checks
+# -----------------------------
+stopifnot(!any(duplicated(MED_DHQ_Data_xlsx$participant_id)))
+stopifnot(!any(duplicated(Cov_baseline$participant_id)))
+stopifnot(!any(duplicated(FH_Density$participant_id)))
+stopifnot(!any(duplicated(bpm_max_scores$participant_id)))
+stopifnot(!any(duplicated(asr_matched$participant_id)))
+stopifnot(!any(duplicated(pds_matched$participant_id)))
+stopifnot(!any(duplicated(prs_data_slim$participant_id)))
+stopifnot(nrow(analytic_df) == nrow(MED_DHQ_Data_xlsx))
+
+# -----------------------------
+# 3) Sample restrictions
+#    (a) Biological mother reporters only
+#    (b) Exclude SNRI users (before or after)
+# -----------------------------
+n_start <- nrow(analytic_df)
+
+analytic_df <- analytic_df %>%
+  filter(ab_p_demo__relation_001 == 1)
+n_bio_mother <- nrow(analytic_df)
+
+analytic_df <- analytic_df %>%
+  filter(!(snri_before == 1 | snri_after == 1))
+n_no_snri <- nrow(analytic_df)
+
+cat("Sample restriction flow:\n",
+    " Start:                    ", n_start,      "\n",
+    " After bio mother filter:  ", n_bio_mother, "\n",
+    " After SNRI exclusion:     ", n_no_snri,    "\n")
+
+# -----------------------------
+# 4) Define variables
+# -----------------------------
+exposure_var <- "ssri_after"
+
+outcomes <- c(
+  "mh_y_bpm__int_sum_mean",
+  "mh_y_bpm__int_sum_max",
+  "mh_t_bpm__ext_sum_mean",
+  "mh_t_bpm__ext_sum_max",
+  "mh_p_cbcl__synd__int_sum_mean",
+  "mh_p_cbcl__synd__int_sum_max",
+  "mh_p_cbcl__synd__ext_sum_mean",
+  "mh_p_cbcl__synd__ext_sum_max",
+  "ysr_dsm_dep_sum_mean",
+  "ysr_dsm_dep_sum_max",
+  "ysr_dsm_anx_sum_mean",
+  "ysr_dsm_anx_sum_max"
+)
+
+outcome_labels <- c(
+  mh_y_bpm__int_sum_mean         = "Youth BPM Int (Mean)",
+  mh_y_bpm__int_sum_max          = "Youth BPM Int (Max)",
+  mh_t_bpm__ext_sum_mean         = "Teacher BPM Ext (Mean)",
+  mh_t_bpm__ext_sum_max          = "Teacher BPM Ext (Max)",
+  mh_p_cbcl__synd__int_sum_mean  = "CBCL Int (Mean)",
+  mh_p_cbcl__synd__int_sum_max   = "CBCL Int (Max)",
+  mh_p_cbcl__synd__ext_sum_mean  = "CBCL Ext (Mean)",
+  mh_p_cbcl__synd__ext_sum_max   = "CBCL Ext (Max)",
+  ysr_dsm_dep_sum_mean           = "YSR DSM Dep (Mean)",
+  ysr_dsm_dep_sum_max            = "YSR DSM Dep (Max)",
+  ysr_dsm_anx_sum_mean           = "YSR DSM Anx (Mean)",
+  ysr_dsm_anx_sum_max            = "YSR DSM Anx (Max)"
+)
+
+# -----------------------------
+# 5) ASR covariate lookup by outcome
+# -----------------------------
+asr_covar_lookup <- list(
+  mh_y_bpm__int_sum_mean         = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  mh_y_bpm__int_sum_max          = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  mh_t_bpm__ext_sum_mean         = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  mh_t_bpm__ext_sum_max          = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  mh_p_cbcl__synd__int_sum_mean  = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  mh_p_cbcl__synd__int_sum_max   = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  mh_p_cbcl__synd__ext_sum_mean  = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  mh_p_cbcl__synd__ext_sum_max   = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  ysr_dsm_dep_sum_mean           = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  ysr_dsm_dep_sum_max            = c("asr_dep_matched_max_c", "asr_anx_matched_max_c"),
+  ysr_dsm_anx_sum_mean           = c("asr_dep_mean_c", "asr_anx_mean_c"),
+  ysr_dsm_anx_sum_max            = c("asr_dep_matched_max_c", "asr_anx_matched_max_c")
+)
+
+# PDS covariate lookup by outcome (temporally matched, mirrors asr_covar_lookup)
+pds_covar_lookup <- list(
+  mh_y_bpm__int_sum_mean         = "pds_mean_c",
+  mh_y_bpm__int_sum_max          = "pds_matched_dep_max_c",
+  mh_t_bpm__ext_sum_mean         = "pds_mean_c",
+  mh_t_bpm__ext_sum_max          = "pds_matched_dep_max_c",
+  mh_p_cbcl__synd__int_sum_mean  = "pds_mean_c",
+  mh_p_cbcl__synd__int_sum_max   = "pds_matched_dep_max_c",
+  mh_p_cbcl__synd__ext_sum_mean  = "pds_mean_c",
+  mh_p_cbcl__synd__ext_sum_max   = "pds_matched_dep_max_c",
+  ysr_dsm_dep_sum_mean           = "pds_mean_c",
+  ysr_dsm_dep_sum_max            = "pds_matched_dep_max_c",
+  ysr_dsm_anx_sum_mean           = "pds_mean_c",
+  ysr_dsm_anx_sum_max            = "pds_matched_anx_max_c"
+)
+
+# -----------------------------
+# 6) PS model covariates
+#    (no ASR, no ssri_before — identical across all configs)
+# -----------------------------
+ps_core_covars <- c(
+  "mh_p_famhx__dep__moth_001",
+  "mom_age_preg_c",
+  "mat_race",
+  "ab_g_dyn__cohort_income__hhold__6lvl",
+  "ab_g_dyn__cohort_edu__cgs"
+)
+
+ps_med_covars <- c(
+  "nonssriad_before",
+  "anticonvulsant_before",
+  "stimulant_before",
+  "sleepaid_before",
+  "anxiolytic_before",
+  "antipsychotic_before",
+  "opioid_before"
+)
+
+ps_sub_covars <- c(
+  "alc_before",
+  "mj_before",
+  "nic_before",
+  "coc_before"
+)
+
+ps_covars_base_c <- c(ps_core_covars, ps_med_covars, ps_sub_covars)
+
+# -----------------------------
+# 7) Outcome model base covariates
+# -----------------------------
+out_core_covars <- c(
+  "mh_p_famhx__dep__moth_001",
+  "mom_age_preg_c",
+  "mat_race",
+  "ab_g_dyn__cohort_income__hhold__6lvl",
+  "ab_g_dyn__cohort_edu__cgs",
+  "planned_preg",
+  "prenatal_vit",
+  "puberty_score_c"
+)
+
+out_med_covars <- c(
+  "nonssriad_after",
+  "otheratd_after",
+  "anticonvulsant_after",
+  "stimulant_after",
+  "sleepaid_after",
+  "anxiolytic_after",
+  "antipsychotic_after",
+  "opioid_after"
+)
+
+out_sub_covars <- c(
+  "alc_after",
+  "mj_after",
+  "nic_after",
+  "coc_after"
+)
+
+out_covars_base <- c(out_core_covars, out_med_covars, out_sub_covars)
+
+# PRS + ancestry PC covariate vector
+prs_covars <- c(
+  "mdd_prs_z",
+  "ab_g_stc__gen_pc__01", "ab_g_stc__gen_pc__02", "ab_g_stc__gen_pc__03",
+  "ab_g_stc__gen_pc__04", "ab_g_stc__gen_pc__05", "ab_g_stc__gen_pc__06",
+  "ab_g_stc__gen_pc__07", "ab_g_stc__gen_pc__08", "ab_g_stc__gen_pc__09",
+  "ab_g_stc__gen_pc__10"
+)
+
+# -----------------------------
+# 8) Check required columns exist
+# -----------------------------
+needed_cols <- unique(c(
+  "participant_id", exposure_var, "ssri_before",
+  "ab_p_demo__relation_001", "snri_before", "snri_after",
+  outcomes,
+  ps_covars_base_c,
+  out_covars_base,
+  "mom_age_preg",
+  "mh_p_asr__dsm__dep_sum", "mh_p_asr__dsm__anx_sum",
+  "asr_dep_matched_max", "asr_anx_matched_max",
+  "asr_dep_mean", "asr_anx_mean",
+  "pds_matched_dep_max", "pds_matched_anx_max", "pds_mean",
+  prs_covars
+)) %>%
+  setdiff(c(
+    "mom_age_preg_c",
+    "asr_dep_matched_max_c", "asr_anx_matched_max_c",
+    "asr_dep_mean_c", "asr_anx_mean_c",
+    "pds_matched_dep_max_c", "pds_matched_anx_max_c", "pds_mean_c",
+    "puberty_score_c"
+  ))
+
+missing_cols <- setdiff(needed_cols, names(analytic_df))
+if (length(missing_cols) > 0) {
+  stop("Missing columns in analytic_df: ", paste(missing_cols, collapse = ", "))
+}
+
+# -----------------------------
+# 9) Center continuous covariates
+# -----------------------------
+analytic_df <- analytic_df %>%
+  mutate(
+    mom_age_preg_c        = as.numeric(scale(mom_age_preg,        scale = FALSE)),
+    asr_dep_matched_max_c = as.numeric(scale(asr_dep_matched_max, scale = FALSE)),
+    asr_anx_matched_max_c = as.numeric(scale(asr_anx_matched_max, scale = FALSE)),
+    asr_dep_mean_c        = as.numeric(scale(asr_dep_mean,        scale = FALSE)),
+    asr_anx_mean_c        = as.numeric(scale(asr_anx_mean,        scale = FALSE)),
+    pds_matched_dep_max_c = as.numeric(scale(pds_matched_dep_max, scale = FALSE)),
+    pds_matched_anx_max_c = as.numeric(scale(pds_matched_anx_max, scale = FALSE)),
+    pds_mean_c            = as.numeric(scale(pds_mean,            scale = FALSE))
+  )
+
+# -----------------------------
+# 10) Initialize results containers
+# -----------------------------
+all_results <- list()
+all_vif     <- list()
+
+# -----------------------------
+# 11) Helper functions
+# -----------------------------
+get_usable_covars <- function(data, covars, label) {
+  miss_tbl <- data.frame(
+    var          = covars,
+    n_missing    = sapply(covars, function(v) sum(is.na(data[[v]]))),
+    n_nonmissing = sapply(covars, function(v) sum(!is.na(data[[v]])))
+  )
+  miss_tbl <- miss_tbl[order(miss_tbl$n_nonmissing), ]
+  cat("\nMissingness table for", label, ":\n")
+  print(miss_tbl)
+  drop_vars <- subset(miss_tbl, n_nonmissing == 0)$var
+  if (length(drop_vars) > 0) {
+    cat("Dropping all-NA covariates:", paste(drop_vars, collapse = ", "), "\n")
+  }
+  setdiff(covars, drop_vars)
+}
+
+fit_weighted_lm_robust <- function(formula, data, wvar = "w_att") {
+  data <- data %>% mutate(.w_att_tmp = .data[[wvar]])
+  fit  <- lm(formula, data = data, weights = .w_att_tmp)
+  vc   <- sandwich::vcovHC(fit, type = "HC1")
+  ct   <- lmtest::coeftest(fit, vcov. = vc)
+  list(fit = fit, vcov = vc, coeftest = ct)
+}
+
+tidy_coeftest <- function(ct) {
+  m   <- as.matrix(unclass(ct))
+  out <- as.data.frame(m, stringsAsFactors = FALSE)
+  if (ncol(out) >= 1) names(out)[1] <- "estimate"
+  if (ncol(out) >= 2) names(out)[2] <- "std_error"
+  if (ncol(out) >= 3) names(out)[3] <- "statistic"
+  if (ncol(out) >= 4) names(out)[4] <- "p_value"
+  out$term <- rownames(m)
+  rownames(out) <- NULL
+  tibble::as_tibble(out)
+}
+
+compute_vif <- function(fit_obj, label) {
+  tryCatch({
+    alias_info    <- alias(fit_obj$fit)
+    aliased_terms <- rownames(alias_info$Complete)
+    if (length(aliased_terms) > 0) {
+      cat("\nAliased terms detected in", label, "— dropping before VIF:\n")
+      cat(paste(aliased_terms, collapse = ", "), "\n")
+      original_formula <- formula(fit_obj$fit)
+      all_terms        <- attr(terms(original_formula), "term.labels")
+      clean_terms      <- setdiff(all_terms, aliased_terms)
+      response         <- as.character(original_formula[[2]])
+      clean_formula    <- as.formula(paste(response, "~", paste(clean_terms, collapse = " + ")))
+      clean_data       <- fit_obj$fit$model
+      clean_data$.w    <- fit_obj$fit$weights
+      clean_fit        <- lm(clean_formula, data = clean_data, weights = .w)
+    } else {
+      clean_fit <- fit_obj$fit
+    }
+    vif_vals <- car::vif(clean_fit)
+    if (is.matrix(vif_vals)) {
+      vif_out <- data.frame(term  = rownames(vif_vals),
+                            vif   = vif_vals[, "GVIF^(1/(2*Df))"]^2,
+                            label = label, stringsAsFactors = FALSE)
+    } else {
+      vif_out <- data.frame(term  = names(vif_vals),
+                            vif   = as.numeric(vif_vals),
+                            label = label, stringsAsFactors = FALSE)
+    }
+    vif_out <- vif_out[order(-vif_out$vif), ]
+    cat("\nVIF diagnostics for", label, ":\n"); print(vif_out)
+    vif_out
+  }, error = function(e) {
+    cat("\nVIF could not be computed for", label, ":", conditionMessage(e), "\n"); NULL
+  })
+}
+
+# -----------------------------
+# 11) Final model: B+PRS on psychotropic-excluded sample
+#     Run twice: with and without puberty score
+# -----------------------------
+
+# Build restricted sample (psychotropics excluded)
+analytic_df_nopsych <- analytic_df %>%
+  filter(
+    nonssriad_after      == 0,
+    anxiolytic_after     == 0,
+    opioid_after         == 0,
+    anticonvulsant_after == 0,
+    antipsychotic_after  == 0,
+    stimulant_after      == 0,
+    sleepaid_after       == 0
+  )
+
+cat("\n\nFinal model sample (psychotropics excluded):\n")
+cat(" N:", nrow(analytic_df_nopsych), "\n")
+cat(" Exposed:", sum(analytic_df_nopsych[[exposure_var]] == 1, na.rm = TRUE), "\n")
+cat(" Unexposed:", sum(analytic_df_nopsych[[exposure_var]] == 0, na.rm = TRUE), "\n")
+
+# Estimate PS once on restricted sample (shared across both runs)
+tmp_expo_nopsych <- analytic_df_nopsych %>% filter(!is.na(.data[[exposure_var]]))
+usable_ps_nopsych <- get_usable_covars(tmp_expo_nopsych, ps_covars_base_c, "final_nopsych")
+ps_cc_nopsych <- tmp_expo_nopsych %>%
+  filter(if_all(all_of(usable_ps_nopsych), ~ !is.na(.x)))
+
+cat("PS complete-case N (restricted):", nrow(ps_cc_nopsych), "\n")
+stopifnot(nrow(ps_cc_nopsych) > 0)
+stopifnot(all(ps_cc_nopsych[[exposure_var]] %in% c(0, 1)))
+
+w_out_nopsych <- weightit(
+  formula  = reformulate(usable_ps_nopsych, response = exposure_var),
+  data     = ps_cc_nopsych,
+  method   = "ps",
+  estimand = "ATT"
+)
+w_out_nopsych       <- trim(w_out_nopsych, at = 0.99)
+ps_cc_nopsych$w_att <- w_out_nopsych$weights
+
+cat("\nWeight summary (restricted):\n"); print(summary(ps_cc_nopsych$w_att))
+ess_nopsych <- (sum(ps_cc_nopsych$w_att))^2 / sum(ps_cc_nopsych$w_att^2)
+cat("Approx overall ESS (restricted):", round(ess_nopsych, 1), "\n")
+
+bal_nopsych <- bal.tab(x = w_out_nopsych, un = TRUE, m.threshold = 0.1)
+cat("\nBalance diagnostics (restricted):\n"); print(bal_nopsych)
+
+# 13a) B+PRS+No-Psych WITH puberty score
+cat("\n\n============================================================\n")
+cat("Running: B_PRS_NoPsych_PDS — B+PRS, no-psych sample, with puberty\n")
+cat("============================================================\n")
+
+fit_final_with_pds <- function(y) {
+  dat_y <- ps_cc_nopsych %>% filter(!is.na(.data[[y]]))
+  if (nrow(dat_y) == 0) { message("Skipping ", y, " — no non-missing observations."); return(NULL) }
+  out_covars_cfg <- c(out_covars_base, "ssri_before", asr_covar_lookup[[y]], prs_covars,
+                      pds_covar_lookup[[y]])
+  usable_out <- get_usable_covars(ps_cc_nopsych, out_covars_cfg, paste("B_PRS_NoPsych_PDS", y))
+  formula_y <- as.formula(paste0(y, " ~ ", exposure_var, " + ", paste(usable_out, collapse = " + ")))
+  fit_weighted_lm_robust(formula_y, dat_y)
+}
+
+fits_with_pds <- setNames(lapply(outcomes, fit_final_with_pds), outcomes)
+
+vif_with_pds <- bind_rows(lapply(names(fits_with_pds), function(y) {
+  if (is.null(fits_with_pds[[y]])) return(NULL)
+  compute_vif(fits_with_pds[[y]], paste("B_PRS_NoPsych_PDS", y))
+}))
+
+results_with_pds <- bind_rows(lapply(names(fits_with_pds), function(y) {
+  if (is.null(fits_with_pds[[y]])) return(NULL)
+  tidy_coeftest(fits_with_pds[[y]]$coeftest) %>%
+    mutate(outcome = y, model = "B_PRS_NoPsych_PDS") %>%
+    select(model, outcome, term, estimate, std_error, statistic, p_value)
+}))
+
+all_results[["B_PRS_NoPsych_PDS"]] <- results_with_pds
+all_vif[["B_PRS_NoPsych_PDS"]]     <- vif_with_pds
+
+# 13b) B+PRS+No-Psych WITHOUT puberty score
+cat("\n\n============================================================\n")
+cat("Running: B_PRS_NoPsych_noPDS — B+PRS, no-psych sample, without puberty\n")
+cat("============================================================\n")
+
+# out_core_covars_nopds: same as out_core_covars but without puberty_score_c
+out_core_covars_nopds <- setdiff(out_core_covars, "puberty_score_c")
+out_covars_base_nopds <- c(out_core_covars_nopds, out_med_covars, out_sub_covars)
+
+fit_final_no_pds <- function(y) {
+  dat_y <- ps_cc_nopsych %>% filter(!is.na(.data[[y]]))
+  if (nrow(dat_y) == 0) { message("Skipping ", y, " — no non-missing observations."); return(NULL) }
+  out_covars_cfg <- c(out_covars_base_nopds, "ssri_before", asr_covar_lookup[[y]], prs_covars)
+  usable_out <- get_usable_covars(ps_cc_nopsych, out_covars_cfg, paste("B_PRS_NoPsych_noPDS", y))
+  formula_y <- as.formula(paste0(y, " ~ ", exposure_var, " + ", paste(usable_out, collapse = " + ")))
+  fit_weighted_lm_robust(formula_y, dat_y)
+}
+
+fits_no_pds <- setNames(lapply(outcomes, fit_final_no_pds), outcomes)
+
+vif_no_pds <- bind_rows(lapply(names(fits_no_pds), function(y) {
+  if (is.null(fits_no_pds[[y]])) return(NULL)
+  compute_vif(fits_no_pds[[y]], paste("B_PRS_NoPsych_noPDS", y))
+}))
+
+results_no_pds <- bind_rows(lapply(names(fits_no_pds), function(y) {
+  if (is.null(fits_no_pds[[y]])) return(NULL)
+  tidy_coeftest(fits_no_pds[[y]]$coeftest) %>%
+    mutate(outcome = y, model = "B_PRS_NoPsych_noPDS") %>%
+    select(model, outcome, term, estimate, std_error, statistic, p_value)
+}))
+
+all_results[["B_PRS_NoPsych_noPDS"]] <- results_no_pds
+all_vif[["B_PRS_NoPsych_noPDS"]]     <- vif_no_pds
+
+# -----------------------------
+# 14) Combine and save results
+# -----------------------------
+results_all <- bind_rows(all_results)
+vif_all     <- bind_rows(all_vif)
+
+results_key <- results_all %>%
+  filter(term == exposure_var) %>%
+  arrange(model, match(outcome, outcomes))
+
+cat("\n\n=== PRIMARY RESULTS (exposure term) ===\n")
+print(results_key, n = Inf)
+
+cat("\n\nVIF summary — terms with VIF > 5:\n")
+if (nrow(vif_all) > 0) {
+  high_vif <- vif_all %>% filter(vif > 5)
+  if (nrow(high_vif) > 0) print(high_vif %>% arrange(label, -vif))
+  else cat("No terms with VIF > 5.\n")
+}
+
+output_path <- "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/04112026 ACE Run/Results"
+dir.create(output_path, recursive = TRUE, showWarnings = FALSE)
+
+write.csv(results_key, file = file.path(output_path, "results_key_WvD_ATT_ABCD.csv"),  row.names = FALSE)
+write.csv(results_all, file = file.path(output_path, "results_full_WvD_ATT_ABCD.csv"), row.names = FALSE)
+write.csv(vif_all,     file = file.path(output_path, "vif_diagnostics_WvD_ATT_ABCD.csv"), row.names = FALSE)
+
+cat("\nResults saved to:", output_path, "\n")
+
+################################################################################
+# End
+################################################################################
