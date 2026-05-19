@@ -7,6 +7,7 @@
 #    theoretical motivation was moderation only — Pavlicova & van Dijk)
 #  - Model configs: A, B [primary], C, B+PRS (no ACEs, no interaction anywhere)
 #  - B No-Psych: Model B specification on psychotropic-excluded sample
+#  - ASR removed from PS model (reverts to correct March/April 13 spec)
 #
 # Assumes these objects already exist in memory:
 #   MED_DHQ_Data_xlsx  (Script 4)
@@ -15,10 +16,6 @@
 #   bpm_max_scores     (Script 1)
 #   asr_matched        (Script 2)
 #   prs_data           (Script 6)
-#
-# Note: abcd_aces_base (Script 5) no longer needed in outcome models.
-#       ACEs moderation was pre-specified, tested, and found null.
-#       Results reported as a dedicated null finding.
 ################################################################################
 
 # -----------------------------
@@ -132,7 +129,7 @@ asr_covar_lookup <- list(
 
 # -----------------------------
 # 6) PS model covariates
-#    (identical across all configs)
+#    (no ASR, no ssri_before — identical across all configs)
 # -----------------------------
 ps_core_covars <- c(
   "mh_p_famhx__dep__moth_001",
@@ -159,13 +156,7 @@ ps_sub_covars <- c(
   "coc_before"
 )
 
-ps_covars_base_c <- c(
-  ps_core_covars,
-  "asr_dep_mean_c",
-  "asr_anx_mean_c",
-  ps_med_covars,
-  ps_sub_covars
-)
+ps_covars_base_c <- c(ps_core_covars, ps_med_covars, ps_sub_covars)
 
 # -----------------------------
 # 7) Outcome model base covariates
@@ -250,11 +241,6 @@ analytic_df <- analytic_df %>%
 # -----------------------------
 # 10) Define model configurations
 #
-# ACEs dropped entirely per Pavlicova & van Dijk:
-# theoretical motivation was moderation only — now confirmed null.
-# Including ACEs as a covariate without moderation justification
-# constitutes overcontrolling in search of significance.
-#
 # Model A:    base covariates only
 # Model B:    + ssri_before + ASR  [PRIMARY]
 # Model C:    + ASR only
@@ -263,28 +249,28 @@ analytic_df <- analytic_df %>%
 model_configs <- list(
 
   model_A = list(
-    label   = "A_no_ssri_before_no_ASR",
+    label    = "A_no_ssri_before_no_ASR",
     out_ssri = FALSE,
     out_asr  = FALSE,
     out_prs  = FALSE
   ),
 
   model_B = list(
-    label   = "B_ssri_before_with_ASR",
+    label    = "B_ssri_before_with_ASR",
     out_ssri = TRUE,
     out_asr  = TRUE,
     out_prs  = FALSE
   ),
 
   model_C = list(
-    label   = "C_no_ssri_before_with_ASR",
+    label    = "C_no_ssri_before_with_ASR",
     out_ssri = FALSE,
     out_asr  = TRUE,
     out_prs  = FALSE
   ),
 
   model_B_prs = list(
-    label   = "B_prs_ssri_before_ASR_PRS",
+    label    = "B_prs_ssri_before_ASR_PRS",
     out_ssri = TRUE,
     out_asr  = TRUE,
     out_prs  = TRUE
@@ -350,12 +336,12 @@ compute_vif <- function(fit_obj, label) {
     }
     vif_vals <- car::vif(clean_fit)
     if (is.matrix(vif_vals)) {
-      vif_out <- data.frame(term = rownames(vif_vals),
-                            vif  = vif_vals[, "GVIF^(1/(2*Df))"]^2,
+      vif_out <- data.frame(term  = rownames(vif_vals),
+                            vif   = vif_vals[, "GVIF^(1/(2*Df))"]^2,
                             label = label, stringsAsFactors = FALSE)
     } else {
-      vif_out <- data.frame(term = names(vif_vals),
-                            vif  = as.numeric(vif_vals),
+      vif_out <- data.frame(term  = names(vif_vals),
+                            vif   = as.numeric(vif_vals),
                             label = label, stringsAsFactors = FALSE)
     }
     vif_out <- vif_out[order(-vif_out$vif), ]
@@ -459,7 +445,6 @@ for (cfg_name in names(model_configs)) {
 
 # -----------------------------
 # 13) Psychotropics sensitivity — Model B specification, restricted sample
-#     No ACEs per Pavlicova & van Dijk decision
 # -----------------------------
 cat("\n\n============================================================\n")
 cat("Running: B No-Psych — Psychotropics Sensitivity (restricted sample)\n")
@@ -513,7 +498,6 @@ fit_one_outcome_nopsych <- function(y) {
   dat_y <- ps_cc_nopsych %>% filter(!is.na(.data[[y]]))
   if (nrow(dat_y) == 0) { message("Skipping ", y, " — no non-missing observations."); return(NULL) }
 
-  # Model B specification — ssri_before + ASR, no ACEs
   out_covars_cfg <- c(out_covars_base, "ssri_before", asr_covar_lookup[[y]])
   usable_out <- get_usable_covars(ps_cc_nopsych, out_covars_cfg, paste("B_no_psych", y))
 
