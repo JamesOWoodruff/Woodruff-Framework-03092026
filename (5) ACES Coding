@@ -1,0 +1,37 @@
+################################################################################
+# Woodruff & van Dijk Framework: ACEs Covariate Preparation
+################################################################################
+
+library(dplyr)
+
+# -----------------------------
+# Data loading
+# -----------------------------
+data_dir <- "C:/Users/jowjo/OneDrive/Desktop/ALL NYSPI/Work for Milenna/Move to SP Test"
+
+# -----------------------------
+# 1) Load
+# -----------------------------
+load(file.path(data_dir, "DijkLabAcesCompilation.Rda"))
+
+# -----------------------------
+# 2) Filter to baseline, select columns
+# -----------------------------
+abcd_aces_base <- abcd_aces_fin %>%
+  filter(session_id == "ses-00A") %>%
+  select(participant_id, AcesTotBaselineand1yrfu)
+
+# -----------------------------
+# 3) Verify
+# -----------------------------
+cat("abcd_aces_base rows:        ", nrow(abcd_aces_base), "\n")
+cat("Distinct participants:      ", n_distinct(abcd_aces_base$participant_id), "\n")
+cat("Duplicates:                 ", sum(duplicated(abcd_aces_base$participant_id)), "\n")
+cat("\nACEs score distribution:\n")
+print(table(abcd_aces_base$AcesTotBaselineand1yrfu, useNA = "ifany"))
+cat("\nSummary:\n")
+print(summary(abcd_aces_base$AcesTotBaselineand1yrfu))
+
+################################################################################
+# Output: abcd_aces_base
+################################################################################
